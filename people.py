@@ -726,67 +726,126 @@ Find any leadership name:"""
         return self._no_result(f"{source} - no names found")
     
     def _extract_any_name_from_text(self, text: str) -> str:
-        """Extract ANY human name from text - very aggressive"""
+        """Extract person names from text - strict validation to avoid garbage"""
         if not text:
             return None
         
-        # Multiple name extraction patterns
-        patterns = [
-            # Standard patterns
-            r'(?:CEO|Chief Executive|President|Founder|Owner|Director|Manager|Chairman)[:\s]*([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)',
-            r'"ceo_name"[:\s]*"([^"]+)"',
-            r'(?:founded|started|created|established|owned|led|managed)\s+by[:\s]*([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)',
-            
-            # More aggressive patterns
-            r'([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)(?:\s+(?:is|was|serves as|acts as))?\s+(?:CEO|Chief Executive|President|Founder|Owner)',
-            r'([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+),?\s+(?:CEO|Chief Executive|President|Founder|Owner)',
-            r'(?:Mr\.|Ms\.|Dr\.)\s+([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)',
-            
-            # Very broad patterns for any capitalized names
-            r'\b([A-Z][a-zA-Z]{2,}\s+[A-Z][a-zA-Z]{2,})\b',
-            
-            # Names in quotes or specific formats
-            r'"([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)"',
-            r'([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)\s+said',
-            r'([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)\s+explained',
+        # First try structured patterns (most reliable)
+        structured_patterns = [
+            r'(?:CEO|Chief Executive|President|Founder|Owner)[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)',
+            r'"ceo_name"[:\s]*"([A-Z][a-z]+\s+[A-Z][a-z]+)"',
+            r'(?:founded|started|led|owned)\s+by[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)',
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+)[,\s]+(?:CEO|Chief Executive|President|Founder)',
         ]
         
-        # Try each pattern
-        for pattern in patterns:
+        for pattern in structured_patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
             for match in matches:
-                if isinstance(match, tuple):
-                    match = match[0] if match else ""
-                
                 name = match.strip()
-                
-                # Filter out obvious non-names
-                if (len(name) > 5 and 
-                    len(name) < 50 and
-                    not any(bad_word in name.lower() for bad_word in [
-                        'not found', 'unknown', 'error', 'company', 'corporation', 
-                        'limited', 'llc', 'inc', 'group', 'team', 'staff',
-                        'information', 'available', 'website', 'linkedin'
-                    ]) and
-                    ' ' in name and  # Must have space (First Last)
-                    name.count(' ') <= 3):  # Not too many words
-                    
-                    logger.info(f"      Extracted name: {name}")
+                if self._is_valid_person_name(name):
+                    return name
+        
+        # If no structured patterns work, try general capitalized names (less reliable)
+        general_pattern = r'\b([A-Z][a-z]{2,15}\s+[A-Z][a-z]{2,15})\b'
+        matches = re.findall(general_pattern, text)
+        
+        for match in matches:
+            name = match.strip()
+            if self._is_valid_person_name(name):
+                # Extra check: name should appear in a business context
+                context_window = text[max(0, text.find(name) - 100):text.find(name) + len(name) + 100].lower()
+                if any(business_term in context_window for business_term in [
+                    'ceo', 'chief', 'president', 'founder', 'owner', 'director', 
+                    'executive', 'manager', 'leader', 'head'
+                ]):
                     return name
         
         return None
+    
+    def _is_valid_person_name(self, name: str) -> str:
+        """Strict validation to ensure this looks like a real person's name"""
+        if not name or len(name.strip()) < 5:
+            return False
+        
+        name = name.strip()
+        
+        # Must have exactly one space (First Last format)
+        parts = name.split()
+        if len(parts) != 2:
+            return False
+        
+        first_name, last_name = parts
+        
+        # Each part must be reasonable length
+        if len(first_name) < 2 or len(last_name) < 2:
+            return False
+        if len(first_name) > 20 or len(last_name) > 20:
+            return False
+        
+        # Must start with capital letters
+        if not (first_name[0].isupper() and last_name[0].isupper()):
+            return False
+        
+        # Must be mostly letters (allow hyphens, apostrophes)
+        allowed_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\'-')
+        if not all(c in allowed_chars for c in name.replace(' ', '')):
+            return False
+        
+        # Reject obvious non-names
+        invalid_words = {
+            # Generic terms
+            'the', 'of', 'and', 'or', 'in', 'on', 'at', 'by', 'for', 'with', 'to',
+            # Business terms
+            'company', 'corporation', 'business', 'enterprise', 'group', 'team',
+            'limited', 'ltd', 'llc', 'inc', 'corp', 'co', 'gmbh', 'sa', 'ag',
+            # Status terms  
+            'found', 'not', 'unknown', 'error', 'missing', 'none', 'null',
+            'leaders', 'leadership', 'management', 'executive', 'director',
+            # Common false positives
+            'name', 'person', 'individual', 'someone', 'people', 'staff',
+            'contact', 'information', 'details', 'profile', 'page', 'site'
+        }
+        
+        # Check if any part is an invalid word
+        for part in parts:
+            if part.lower() in invalid_words:
+                return False
+        
+        # Reject if it looks like a title or position
+        title_words = {
+            'chief', 'senior', 'junior', 'assistant', 'deputy', 'vice',
+            'head', 'lead', 'main', 'primary', 'general', 'regional'
+        }
+        
+        if any(part.lower() in title_words for part in parts):
+            return False
+        
+        # Reject common placeholder patterns
+        placeholder_patterns = [
+            r'name\s+\w+', r'\w+\s+name', r'no\s+\w+', r'\w+\s+found',
+            r'not\s+\w+', r'\w+\s+not', r'missing\s+\w+', r'\w+\s+missing'
+        ]
+        
+        name_lower = name.lower()
+        if any(re.search(pattern, name_lower) for pattern in placeholder_patterns):
+            return False
+        
+        return True
     
     def search_ceo_linkedin(self, ceo_name: str, company_name: str) -> str:
         """Search for LinkedIn profile using multiple methods with robust error handling"""
         if not ceo_name or ceo_name in ['Not found', 'Error', '']:
             return ""
         
-        logger.info(f"        Searching for LinkedIn profile of: {ceo_name}")
+        # Only search if we have a valid CEO name
+        if not self._is_valid_name_for_linkedin_search(ceo_name):
+            return ""
+        
+        print(f"        Searching for LinkedIn profile of: {ceo_name}")
         
         # Method 1: Try Google Custom Search first (if available)
         if self.google_search_client and self.google_search_engine_id:
             try:
-                logger.info(f"        Trying Google Custom Search for LinkedIn...")
                 self._rate_limit('google_linkedin_search', 1.0)
                 
                 query = f'"{ceo_name}" "{company_name}" site:linkedin.com/in'
@@ -804,27 +863,25 @@ Find any leadership name:"""
                     if 'items' in data:
                         for item in data['items']:
                             link = item.get('link', '')
-                            if 'linkedin.com/in/' in link and len(link) > 30:
-                                logger.info(f"        ✓ Google found LinkedIn: {link}")
+                            if self._is_valid_linkedin_url(link, ceo_name):
+                                print(f"        ✓ Google found LinkedIn: {link}")
                                 return link
                 
             except Exception as e:
-                logger.warning(f"        Google Custom Search LinkedIn failed: {e}")
+                pass  # Continue to next method
         
-        # Method 2: Try DuckDuckGo with shorter timeout and better error handling
+        # Method 2: Try DuckDuckGo search only - NO AI generation
         search_queries = [
-            f'"{ceo_name}" LinkedIn',
-            f'{ceo_name} {company_name} LinkedIn'
+            f'"{ceo_name}" "{company_name}" LinkedIn',
+            f'{ceo_name} LinkedIn'
         ]
         
         for query in search_queries[:1]:  # Limit to one query to avoid timeouts
             try:
-                logger.info(f"        Trying DuckDuckGo search: {query}")
                 self._rate_limit('linkedin_search', 2.0)
                 
                 search_url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
                 
-                # Shorter timeout and better error handling
                 response = self.session.get(search_url, timeout=6)
                 if response.status_code == 200:
                     # Look for LinkedIn profile URLs
@@ -835,86 +892,86 @@ Find any leadership name:"""
                     
                     for pattern in linkedin_patterns:
                         matches = re.findall(pattern, response.text)
-                        for match in matches[:2]:  # Only check first 2 matches
+                        for match in matches[:3]:
                             if not match.startswith('http'):
                                 match = 'https://' + match
                             
-                            if len(match) > 30 and '/in/' in match:
-                                logger.info(f"        ✓ DuckDuckGo found LinkedIn: {match}")
+                            if self._is_valid_linkedin_url(match, ceo_name):
+                                print(f"        ✓ Found LinkedIn: {match}")
                                 return match
                 
-                # Small delay between attempts
                 time.sleep(0.3)
                 
-            except requests.exceptions.Timeout:
-                logger.warning(f"        DuckDuckGo search timed out for: {query}")
-                continue
-            except requests.exceptions.ConnectionError:
-                logger.warning(f"        DuckDuckGo connection failed for: {query}")
-                continue
-            except Exception as e:
-                logger.warning(f"        DuckDuckGo search failed for {query}: {str(e)}")
+            except Exception:
                 continue
         
-        # Method 3: AI-based LinkedIn URL generation (fallback)
-        try:
-            logger.info(f"        Trying AI-based LinkedIn URL generation...")
-            linkedin_url = self._generate_linkedin_url_with_ai(ceo_name, company_name)
-            if linkedin_url:
-                logger.info(f"        ✓ AI generated LinkedIn URL: {linkedin_url}")
-                return linkedin_url
-        except Exception as e:
-            logger.warning(f"        AI LinkedIn generation failed: {e}")
-        
-        logger.info(f"        ✗ No LinkedIn profile found for {ceo_name}")
+        # Return empty string if no real LinkedIn URL found
+        print(f"        ✗ No LinkedIn profile found for {ceo_name}")
         return ""
     
-    def _generate_linkedin_url_with_ai(self, ceo_name: str, company_name: str) -> str:
-        """Use AI to generate most likely LinkedIn URL format"""
-        try:
-            self._rate_limit('ai_linkedin_gen', 1.0)
-            
-            prompt = f"""Based on the name "{ceo_name}" who works at "{company_name}", generate the most likely LinkedIn profile URL.
-
-LinkedIn URLs follow the pattern: https://linkedin.com/in/[username]
-
-Common username patterns:
-- firstname-lastname
-- firstnamelastname  
-- firstname-lastname-numbers
-- firstinitiallastname
-
-For "{ceo_name}", what would be the most likely LinkedIn username?
-Return ONLY the most probable LinkedIn URL, nothing else.
-
-Example format: https://linkedin.com/in/john-smith"""
-
-            if self.use_new_openai_api:
-                response = self.openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.1,
-                    max_tokens=50
-                )
-                result = response.choices[0].message.content.strip()
-            else:
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.1,
-                    max_tokens=50
-                )
-                result = response.choices[0].message.content.strip()
-            
-            # Extract LinkedIn URL from response
-            linkedin_match = re.search(r'https://linkedin\.com/in/[a-zA-Z0-9-]+/?', result)
-            if linkedin_match:
-                return linkedin_match.group()
-            
-        except Exception as e:
-            logger.warning(f"AI LinkedIn generation error: {e}")
+    def _is_valid_name_for_linkedin_search(self, name: str) -> bool:
+        """Check if the name is valid enough to search for on LinkedIn"""
+        if not name or len(name.strip()) < 4:
+            return False
         
-        return ""
+        # Don't search for obviously invalid names
+        invalid_terms = [
+            'not found', 'error', 'unknown', 'n/a', 'none', 'invalid',
+            'no name', 'unnamed', 'missing', 'null', 'empty', 'no-name',
+            'company', 'corporation', 'ltd', 'llc', 'inc', 'group'
+        ]
+        
+        name_lower = name.lower()
+        if any(term in name_lower for term in invalid_terms):
+            return False
+        
+        # Must look like a real person's name (First Last format)
+        if ' ' not in name.strip():
+            return False
+        
+        # Must have reasonable length
+        if len(name) > 50:
+            return False
+        
+        # Must contain letters
+        if not any(c.isalpha() for c in name):
+            return False
+        
+        return True
+    
+    def _is_valid_linkedin_url(self, url: str, ceo_name: str) -> bool:
+        """Validate that a LinkedIn URL is real and potentially matches the CEO"""
+        if not url or len(url) < 30:
+            return False
+        
+        if '/in/' not in url:
+            return False
+        
+        # Extract username from LinkedIn URL
+        try:
+            username = url.split('/in/')[-1].split('?')[0].split('/')[0]
+            
+            # Check for obviously invalid usernames
+            invalid_usernames = [
+                'no-name-found', 'not-found', 'unknown', 'error',
+                'missing', 'null', 'empty', 'invalid', 'no-name'
+            ]
+            
+            if username.lower() in invalid_usernames:
+                return False
+            
+            # Username should have reasonable length
+            if len(username) < 3 or len(username) > 100:
+                return False
+            
+            # Basic sanity check - username should contain letters or numbers
+            if not any(c.isalnum() for c in username):
+                return False
+            
+            return True
+            
+        except Exception:
+            return False
     
     def _is_valid_result(self, result: Dict[str, Any]) -> bool:
         """Check if result has a valid name"""
