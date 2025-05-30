@@ -1,6 +1,8 @@
 # People-Search-Desktop-App
 
 Package Structure for Distribution:
+# CEO Finder Pro
+
 CEO Finder Pro/
 ├── ceo_finder_gui.py           # Desktop app with a user-friendly interface
 ├── people.py                   # The core logic and engine for finding and processing CEO data
